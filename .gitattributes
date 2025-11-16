@@ -1,0 +1,18 @@
+# Exclude virtual environment directories from language statistics
+.venv/ linguist-detectable=false
+.venv312/ linguist-detectable=false
+venv/ linguist-detectable=false
+env/ linguist-detectable=false
+ENV/ linguist-detectable=false
+
+# Exclude Python cache and compiled files
+__pycache__/ linguist-detectable=false
+*.pyc linguist-detectable=false
+*.pyo linguist-detectable=false
+
+# Exclude data and output directories from language statistics
+indexes/ linguist-detectable=false
+outputs/ linguist-detectable=false
+*.npy linguist-detectable=false
+*.index linguist-detectable=false
+

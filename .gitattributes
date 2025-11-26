@@ -1,0 +1,2 @@
+data/passages_train.jsonl filter=lfs diff=lfs merge=lfs -text
+indexes/passages.txt filter=lfs diff=lfs merge=lfs -text

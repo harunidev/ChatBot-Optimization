@@ -862,6 +862,7 @@ def main():
     parser.add_argument("--semantic-batch-size", type=int, default=128, help="Batch size for semantic similarity encodings")
     parser.add_argument("--noise-test-size", type=int, default=500, help="Maximum queries to test for noise robustness")
     parser.add_argument("--rerank-batch-size", type=int, default=64, help="Batch size for cross-encoder reranker")
+    parser.add_argument("--limit", type=int, default=None, help="Limit number of queries to evaluate (default: 500 for speed)")
     args = parser.parse_args()
     
     os.makedirs(os.path.dirname(args.output_report), exist_ok=True)
@@ -905,6 +906,15 @@ def main():
     # 4. Load Eval Data
     with open(args.eval_file, 'r', encoding='utf-8') as f:
         eval_data = [json.loads(line) for line in f]
+    
+    # Apply limit if specified (default 500)
+    if args.limit > 0 and len(eval_data) > args.limit:
+        print(f"⚠️ Limiting evaluation to random subset of {args.limit} queries (of {len(eval_data)}) for speed.", flush=True)
+        random.seed(42)  # Ensure reproducibility
+        random.shuffle(eval_data)
+        eval_data = eval_data[:args.limit]
+    else:
+        print(f"Running evaluation on full set: {len(eval_data)} queries.", flush=True)
         
     # 5. Load Question Encoder (Optimize: Load once)
     q_tokenizer = DPRQuestionEncoderTokenizer.from_pretrained("facebook/dpr-question_encoder-single-nq-base")
@@ -1187,13 +1197,13 @@ def main():
         # NEW METRICS: Safety Refusal (only for unsafe queries)
         if is_unsafe_query(all_queries[i]):
             unsafe_query_indices.append(i)
-            refusal_flag = has_refusal_pattern(prediction_text)
+            refusal_flag = has_refusal_pattern(generated_answer)
             metrics["Safety_Refusal_Flags"].append(1 if refusal_flag else 0)
         
         # NEW METRICS: Injection Robustness (only for injection queries)
         if is_injection_query(all_queries[i]):
             injection_query_indices.append(i)
-            robustness_flag = check_injection_robustness(prediction_text, all_queries[i])
+            robustness_flag = check_injection_robustness(generated_answer, all_queries[i])
             metrics["Injection_Robustness_Flags"].append(1 if robustness_flag else 0)
         
         # NEW METRICS: RAGAS (token-based fast path, semantic batch later)
@@ -1218,7 +1228,7 @@ def main():
         
         # Answer Semantic Similarity (use F1 as proxy for now)
         if gold_ans:
-            _, f1_gold = compute_em_f1(prediction_text, gold_ans)
+            _, f1_gold = compute_em_f1(generated_answer, gold_ans)
             metrics["RAGAS_Answer_Semantic_Similarity_Proxy"].append(f1_gold)
         else:
             metrics["RAGAS_Answer_Semantic_Similarity_Proxy"].append(0.0)

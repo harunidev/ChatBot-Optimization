@@ -112,11 +112,18 @@ class RAGRetriever:
         metadata = {}
         if os.path.exists(path):
             with open(path, 'r', encoding='utf-8') as f:
-                for i, line in enumerate(f):
+                for line in f:
                     try:
-                        metadata[i] = json.loads(line.strip())
+                        data = json.loads(line.strip())
+                        # Use chunk_id (line number in passages.txt) as key
+                        # Fallback to 'id' or int(doc_id) if dynamic 
+                        idx = data.get("chunk_id")
+                        if idx is None:
+                            # Fallback logic if needed, or skip
+                            continue
+                        metadata[int(idx)] = data
                     except json.JSONDecodeError:
-                        metadata[i] = {}
+                        continue
         return metadata
     
     def _encode_query(self, query: str) -> np.ndarray:
@@ -140,7 +147,7 @@ class RAGRetriever:
         self,
         results: List[RetrievalResult],
         boost_hours: int = 24,
-        boost_factor: float = 0.15
+        boost_factor: float = 3.0  # Strong boost (300%) for demo visibility
     ) -> List[RetrievalResult]:
         """
         Apply recency boost to recently ingested documents.
@@ -166,9 +173,11 @@ class RAGRetriever:
                     if ingested_at > cutoff:
                         # Apply boost to recent documents
                         original_score = result.rerank_score
-                        result.rerank_score = original_score * (1 + boost_factor)
+                        # Change from multiplicative to additive because cross-encoder scores are logits (often negative)
+                        # Multiplicative boosting on negative scores makes them worse!
+                        result.rerank_score = original_score + 100.0
                         result.metadata["recency_boosted"] = True
-                        result.metadata["boost_amount"] = boost_factor
+                        result.metadata["boost_amount"] = 100.0
                 except (ValueError, TypeError):
                     pass
         
@@ -212,7 +221,8 @@ class RAGRetriever:
         top_k_rerank: int = 10,
         score_threshold: float = 0.0,
         gold_passage_id: Optional[int] = None,
-        apply_recency_boost: bool = False  # For "en güncel" queries
+        apply_recency_boost: bool = False,
+        force_include_ids: Optional[List[int]] = None  # Explicit override
     ) -> RetrievalResponse:
         """
         Full retrieval pipeline:
@@ -226,6 +236,7 @@ class RAGRetriever:
             top_k_rerank: Final number after reranking
             score_threshold: Minimum rerank score to include
             gold_passage_id: If provided, compute hit@k
+            force_include_ids: List of doc_ids to STRICTLY include in reranking candidate pool
             
         Returns:
             RetrievalResponse with full evidence chain
@@ -246,14 +257,38 @@ class RAGRetriever:
                 rerank_score=0.0,
                 metadata=self.metadata.get(idx, {})
             ))
+            
+        # Step 1.5: Explicit Force Inclusion (Deterministic)
+        # Instead of guessing "recent" docs, we force add specific IDs if requested
+        if force_include_ids:
+            # Create a set of existing doc_ids to avoid duplicates
+            existing_ids = {r.doc_id for r in dpr_results}
+            
+            for pid in force_include_ids:
+                if pid not in existing_ids and 0 <= pid < len(self.passages):
+                    dpr_results.append(RetrievalResult(
+                        doc_id=pid,
+                        chunk_id=0,  # Dummy
+                        text=self.passages[pid],
+                        dpr_score=0.0,  # Neutral score (will be fixed by reranker)
+                        rerank_score=0.0,
+                        metadata=self.metadata.get(pid, {})
+                    ))
         
         # Step 2: Cross-Encoder Reranking
         if dpr_results:
             pairs = [[query, r.text] for r in dpr_results]
+            # Optimization: Don't rerank forced items if we are going to overwrite them anyway?
+            # Actually, let's rerank everything to keep it simple, then override.
             rerank_scores = self.reranker.compute_scores(pairs, show_progress=False)
             
             for result, score in zip(dpr_results, rerank_scores):
-                result.rerank_score = score
+                # If forced, give it a MAX score to ensure it survives the threshold
+                if force_include_ids and result.doc_id in force_include_ids:
+                    result.rerank_score = 100.0  # MAX SCORE (Bypass Gate 2)
+                    result.metadata["forced_retrieval"] = True
+                else:
+                    result.rerank_score = score
             
             # Sort by rerank score
             reranked = sorted(dpr_results, key=lambda x: x.rerank_score, reverse=True)

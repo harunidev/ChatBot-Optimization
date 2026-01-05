@@ -4,32 +4,6 @@
 
 Bu sistem, RAG (Retrieval-Augmented Generation) Architecture 1 için kapsamlı bir değerlendirme sistemi oluşturur. Soru-cevap görevlerinde performans metriklerini hesaplar ve raporlar.
 
----
-
-## 2. KÜTÜPHANELER VE BAĞIMLILIKLAR
-
-### 2.1. Standart Kütüphaneler
-- `argparse`: Komut satırı argümanları
-- `json`: JSON veri işleme
-- `time`: Zaman ölçümü
-- `os`: Dosya sistemi işlemleri
-- `sys`: Sistem parametreleri
-- `typing`: Tip ipuçları
-
-### 2.2. Bilimsel Hesaplama
-- `numpy`: Sayısal işlemler
-- `torch`: PyTorch (GPU desteği)
-
-### 2.3. NLP ve Metrikler
-- `transformers`: DPR Question Encoder
-- `rouge_score`: ROUGE-L
-- `sacrebleu`: BLEU
-- `faiss`: Vektör arama
-
-### 2.4. Sistem İzleme
-- `psutil`: CPU/RAM izleme
-- `pynvml`: GPU enerji izleme (opsiyonel)
-- `tqdm`: İlerleme çubukları
 
 ### 2.5. Özel Modüller
 - `arch1_embeddings`: Embedding işlemleri

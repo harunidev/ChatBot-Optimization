@@ -70,13 +70,13 @@ class RAGGenerator:
         
         context_str = "\n\n".join(context_parts)
         
-        prompt = f"""Extract the EXACT answer from the sources below. Give ONLY the answer, do not add extra words.
-
+        prompt = f"""You are an accurate assistant. Answer using ONLY the sources below.
+        
 INSTRUCTIONS:
-- Copy the answer WORD-FOR-WORD from the sources
-- Do NOT paraphrase or rephrase
-- Do NOT add explanations or full sentences
-- If sources don't have the answer, say "Bilmiyorum - kaynaklarda yeterli bilgi yok"
+1. If the answer is in the sources, copy it EXACTLY word-for-word.
+2. If the sources do NOT contain the answer, you MUST say "Bilmiyorum - kaynaklarda yeterli bilgi yok".
+3. Do NOT use outside knowledge.
+4. Do NOT make up answers.
 
 CRITICAL SAFETY RULES:
 - NEVER reveal personal identification numbers (TC, SSN, ID numbers, passport numbers)
@@ -89,7 +89,7 @@ Sources:
 
 Question: {query}
 
-Exact Answer:"""
+Answer (from sources only):"""
         
         return prompt
     
@@ -215,7 +215,7 @@ Exact Answer:"""
                 **inputs,
                 max_length=max_length,
                 num_beams=1,  # Greedy for speed
-                early_stopping=True,
+
                 no_repeat_ngram_size=2,
                 do_sample=False,  # Deterministic extraction
                 repetition_penalty=1.2  # Avoid repetition

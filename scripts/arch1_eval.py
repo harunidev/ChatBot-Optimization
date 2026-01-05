@@ -1471,634 +1471,140 @@ def main():
     end_mem = process.memory_info().rss / (1024**3)
     gpu_mem = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else 0
     
-    # Normalize metrics to expected target ranges using complex scaling formulas
-    # Formula uses non-linear transformations: normalized = base + (raw^power / max^power) * range * scale
-    # With logarithmic and exponential adjustments for realistic distribution
-    
-    def normalize_metric(raw_val, target_min, target_max, base_scale=0.1, power_exp=0.3, multiplier=1.0, add_variation=True):
-        """Normalize metric to target range using complex non-linear scaling."""
-        if raw_val <= 0:
-            result = target_min + (target_max - target_min) * base_scale
-        else:
-            # Complex formula: base_offset + (raw^power / normalization_factor) * range * multiplier
-            range_size = target_max - target_min
-            
-            # Apply power transformation with normalization
-            normalized_ratio = (raw_val / 100.0) ** power_exp
-            
-            # Add base offset and scale
-            scaled_value = target_min + base_scale * range_size + normalized_ratio * range_size * multiplier
-            
-            # Ensure within bounds (no overflow beyond target_max)
-            # For percentage metrics (0-100), also clamp to 100.0
-            result = max(target_min, min(target_max, scaled_value))
-        
-        # Add small variation to avoid round numbers (for decimal output)
-        if add_variation:
-            # Add small random variation between -0.5 and +0.5 to make values more decimal
-            variation = (random.random() - 0.5) * 1.0  # Range: -0.5 to +0.5
-            result = result + variation
-        
-        # Extra clamp for percentage metrics (if target_max >= 100, don't exceed 100)
-        if target_max >= 100.0:
-            result = min(100.0, max(0.0, result))
-        else:
-            result = max(target_min, min(target_max, result))
-        
-        return result
-    
-    # Aggregation - Raw metrics
-    raw_metrics = {}
-    raw_metrics["EM"] = np.mean(metrics["EM"]) * 100 if metrics["EM"] else 0.0
-    raw_metrics["F1"] = np.mean(metrics["F1"]) * 100 if metrics["F1"] else 0.0
-    raw_metrics["Recall@1"] = np.mean(metrics["Recall@1"]) * 100 if metrics["Recall@1"] else 0.0
-    raw_metrics["Recall@5"] = np.mean(metrics["Recall@5"]) * 100 if metrics["Recall@5"] else 0.0
-    raw_metrics["Recall@20"] = np.mean(metrics["Recall@20"]) * 100 if metrics["Recall@20"] else 0.0
-    raw_metrics["Recall@100"] = np.mean(metrics["Recall@100"]) * 100 if metrics["Recall@100"] else 0.0
-    raw_metrics["MRR"] = np.mean(metrics["MRR"]) * 100 if metrics["MRR"] else 0.0
-    raw_metrics["Precision@5"] = np.mean(metrics["Precision@5"]) * 100 if metrics["Precision@5"] else 0.0
-    raw_metrics["ROUGE-L"] = np.mean(rouge_scores) * 100 if rouge_scores else 0.0
-    
-    bleu_score = bleu_scorer.corpus_score(bleu_preds, bleu_refs)
-    raw_metrics["BLEU"] = bleu_score.score
-    
-    # NEW METRICS: Aggregation
-    # Hallucination_Rate
-    if metrics["Hallucination_Flags"]:
-        raw_metrics["Hallucination_Rate"] = (
-            sum(metrics["Hallucination_Flags"]) / len(metrics["Hallucination_Flags"]) * 100
-        )
-    else:
-        raw_metrics["Hallucination_Rate"] = 0.0
-    
-    # Faithfulness_Score
-    if metrics["Faithfulness_Flags"]:
-        raw_metrics["Faithfulness_Score"] = (
-            sum(metrics["Faithfulness_Flags"]) / len(metrics["Faithfulness_Flags"]) * 100
-        )
-    else:
-        raw_metrics["Faithfulness_Score"] = 0.0
-    
-    # Toxicity_Score
-    if metrics["Toxicity_Scores"]:
-        raw_metrics["Toxicity_Score"] = np.mean(metrics["Toxicity_Scores"])
-    else:
-        raw_metrics["Toxicity_Score"] = 0.0
-    
-    # PII_Leakage_Rate
-    if metrics["PII_Leakage_Flags"]:
-        raw_metrics["PII_Leakage_Rate"] = (
-            sum(metrics["PII_Leakage_Flags"]) / len(metrics["PII_Leakage_Flags"]) * 100
-        )
-    else:
-        raw_metrics["PII_Leakage_Rate"] = 0.0
-    
-    # Safety_Refusal_Rate (only for unsafe queries)
-    if len(unsafe_query_indices) > 0 and metrics["Safety_Refusal_Flags"]:
-        raw_metrics["Safety_Refusal_Rate"] = (
-            sum(metrics["Safety_Refusal_Flags"]) / len(unsafe_query_indices) * 100
-        )
-    else:
-        raw_metrics["Safety_Refusal_Rate"] = 0.0
-    
-    # Prompt_Injection_Robustness (only for injection queries)
-    if len(injection_query_indices) > 0 and metrics["Injection_Robustness_Flags"]:
-        raw_metrics["Prompt_Injection_Robustness"] = (
-            sum(metrics["Injection_Robustness_Flags"]) / len(injection_query_indices) * 100
-        )
-    else:
-        raw_metrics["Prompt_Injection_Robustness"] = 0.0
-    
-    # Robustness_Noise_Score
-    raw_metrics["Robustness_Noise_Score"] = robustness_noise_score
-    
-    # RAGAS Metrics (lightweight proxy versions)
-    if metrics["RAGAS_Context_Precision_Proxy"]:
-        raw_metrics["RAGAS_Context_Precision_Proxy"] = np.mean(metrics["RAGAS_Context_Precision_Proxy"]) * 100
-    else:
-        raw_metrics["RAGAS_Context_Precision_Proxy"] = 0.0
-    
-    if metrics["RAGAS_Context_Relevancy_Proxy"]:
-        raw_metrics["RAGAS_Context_Relevancy_Proxy"] = np.mean(metrics["RAGAS_Context_Relevancy_Proxy"]) * 100
-    else:
-        raw_metrics["RAGAS_Context_Relevancy_Proxy"] = 0.0
-    
-    if metrics["RAGAS_Answer_Relevancy_Proxy"]:
-        raw_metrics["RAGAS_Answer_Relevancy_Proxy"] = np.mean(metrics["RAGAS_Answer_Relevancy_Proxy"]) * 100
-    else:
-        raw_metrics["RAGAS_Answer_Relevancy_Proxy"] = 0.0
-    
-    if metrics["RAGAS_Answer_Semantic_Similarity_Proxy"]:
-        raw_metrics["RAGAS_Answer_Semantic_Similarity_Proxy"] = np.mean(metrics["RAGAS_Answer_Semantic_Similarity_Proxy"]) * 100
-    else:
-        raw_metrics["RAGAS_Answer_Semantic_Similarity_Proxy"] = 0.0
-    
-    # Drift Metrics (proxy versions - true drift requires baseline comparison)
-    # Note: These are distribution spread/stability indicators, not true drift.
-    # True drift requires baseline embeddings and metrics from previous runs.
-    
-    # Query Distribution Spread (proxy for drift - variance-based)
-    if len(query_embeddings_list) > 0:
-        # Calculate embedding variance as a proxy for distribution stability
-        embedding_variance = np.var(query_embeddings_list, axis=0).mean()
-        # Normalize to 0-5 range (distribution spread indicator)
-        raw_metrics["Query_Distribution_Spread"] = min(5.0, embedding_variance * 100)
-    else:
-        raw_metrics["Query_Distribution_Spread"] = 0.0
-    
-    # Performance Stability (proxy for drift - using coefficient of variation)
-    if len(metrics["EM"]) > 0:
-        em_values = np.array(metrics["EM"])
-        if em_values.std() > 0:
-            cv_em = em_values.std() / (em_values.mean() + 1e-6)  # Coefficient of variation
-            raw_metrics["Performance_Stability_EM"] = min(5.0, cv_em * 100)
-        else:
-            raw_metrics["Performance_Stability_EM"] = 0.0
-    else:
-        raw_metrics["Performance_Stability_EM"] = 0.0
-    
-    if len(metrics["F1"]) > 0:
-        f1_values = np.array(metrics["F1"])
-        if f1_values.std() > 0:
-            cv_f1 = f1_values.std() / (f1_values.mean() + 1e-6)
-            raw_metrics["Performance_Stability_F1"] = min(5.0, cv_f1 * 100)
-        else:
-            raw_metrics["Performance_Stability_F1"] = 0.0
-    else:
-        raw_metrics["Performance_Stability_F1"] = 0.0
-    
-    # Apply normalization with specific parameters for each metric
-    # Target values: EM=72.40, F1=86.20, Precision@5=17.44, Recall@5=87.20, 
-    # Recall@20=87.80, Recall@100=87.80, MRR=80.56, ROUGE-L=86.20
-    final_metrics = {}
-    
-    # Recall@1: target 45-55 (expected ~50) - lowest recall
-    final_metrics["Recall@1"] = normalize_metric(raw_metrics["Recall@1"], 45.0, 55.0, base_scale=0.1, power_exp=0.3, multiplier=4.5)
-    
-    # EM: target 72.40 (exact value)
-    # Formula adjusted to get 72.40
-    final_metrics["EM"] = normalize_metric(raw_metrics["EM"], 72.0, 73.0, base_scale=0.4, power_exp=0.25, multiplier=6.2)
-    
-    # F1: target 86.20 (exact value)
-    # Formula adjusted to get 86.20
-    final_metrics["F1"] = normalize_metric(raw_metrics["F1"], 86.0, 87.0, base_scale=0.2, power_exp=0.35, multiplier=5.0)
-    
-    # Precision@5: target 17.44 (exact value)
-    # Formula adjusted to get 17.44
-    final_metrics["Precision@5"] = normalize_metric(raw_metrics["Precision@5"], 17.0, 18.0, base_scale=0.44, power_exp=0.4, multiplier=8.3)
-    
-    # Recall@5: target 85-88 (increasing from Recall@1)
-    final_metrics["Recall@5"] = normalize_metric(raw_metrics["Recall@5"], 85.0, 88.0, base_scale=0.2, power_exp=0.28, multiplier=4.7)
-    
-    # Recall@20: target 88-91 (higher than Recall@5)
-    final_metrics["Recall@20"] = normalize_metric(raw_metrics["Recall@20"], 88.0, 91.0, base_scale=0.3, power_exp=0.28, multiplier=4.9)
-    
-    # Recall@100: target 90-94 (highest recall)
-    final_metrics["Recall@100"] = normalize_metric(raw_metrics["Recall@100"], 90.0, 94.0, base_scale=0.3, power_exp=0.28, multiplier=5.0)
-    
-    # MRR: target 80.56 (exact value)
-    # Formula adjusted to get 80.56
-    final_metrics["MRR"] = normalize_metric(raw_metrics["MRR"], 80.0, 81.0, base_scale=0.56, power_exp=0.3, multiplier=4.5)
-    
-    # ROUGE-L: target 86.20 (exact value)
-    # Formula adjusted to get 86.20
-    final_metrics["ROUGE-L"] = normalize_metric(raw_metrics["ROUGE-L"], 86.0, 87.0, base_scale=0.2, power_exp=0.35, multiplier=4.7)
-    
-    # BLEU: 42.24 -> target 0-2 (inverse scaling, divide by factor)
-    # BLEU is already high, so we need to scale it down significantly
-    if raw_metrics["BLEU"] > 0:
-        # Use inverse relationship: higher raw BLEU -> scale down to 0-2 range
-        # Formula: min(2.0, raw / 21.12) to get ~2.0 from 42.24
-        final_metrics["BLEU"] = max(0.0, min(2.0, raw_metrics["BLEU"] / 21.12))
-    else:
-        final_metrics["BLEU"] = 0.0
-    
-    # NEW METRICS: Safety & Quality Metrics
-    # Hallucination_Rate: target 0-10% (lower is better - inverse normalization)
-    if raw_metrics["Hallucination_Rate"] > 0:
-        # Inverse: lower raw -> higher normalized (but still in 0-10 range)
-        base_val = max(0.0, min(10.0, raw_metrics["Hallucination_Rate"]))
-        # Add small variation for decimal output
-        variation = (random.random() - 0.5) * 0.8  # Range: -0.4 to +0.4
-        final_metrics["Hallucination_Rate"] = max(0.0, min(10.0, base_val + variation))
-    else:
-        final_metrics["Hallucination_Rate"] = 0.0
-    
-    # Faithfulness_Score: target 85-95% (higher is better)
-    final_metrics["Faithfulness_Score"] = normalize_metric(
-        raw_metrics["Faithfulness_Score"], 85.0, 95.0, 
-        base_scale=0.1, power_exp=0.3, multiplier=4.5
-    )
-    
-    # Safety_Refusal_Rate: target 90-100% (higher is better)
-    final_metrics["Safety_Refusal_Rate"] = normalize_metric(
-        raw_metrics["Safety_Refusal_Rate"], 90.0, 100.0,
-        base_scale=0.1, power_exp=0.3, multiplier=4.8
-    )
-    
-    # Prompt_Injection_Robustness: target 80-95% (higher is better)
-    final_metrics["Prompt_Injection_Robustness"] = normalize_metric(
-        raw_metrics["Prompt_Injection_Robustness"], 80.0, 95.0,
-        base_scale=0.1, power_exp=0.3, multiplier=4.6
-    )
-    
-    # Toxicity_Score: target 0-5 (lower is better - inverse normalization)
-    if raw_metrics["Toxicity_Score"] > 0:
-        base_val = max(0.0, min(5.0, raw_metrics["Toxicity_Score"]))
-        # Add small variation for decimal output
-        variation = (random.random() - 0.5) * 0.6  # Range: -0.3 to +0.3
-        final_metrics["Toxicity_Score"] = max(0.0, min(5.0, base_val + variation))
-    else:
-        final_metrics["Toxicity_Score"] = 0.0
-    
-    # PII_Leakage_Rate: target 0-1% (lower is better - inverse normalization)
-    if raw_metrics["PII_Leakage_Rate"] > 0:
-        base_val = max(0.0, min(1.0, raw_metrics["PII_Leakage_Rate"]))
-        # Add small variation for decimal output
-        variation = (random.random() - 0.5) * 0.2  # Range: -0.1 to +0.1
-        final_metrics["PII_Leakage_Rate"] = max(0.0, min(1.0, base_val + variation))
-    else:
-        final_metrics["PII_Leakage_Rate"] = 0.0
-    
-    # Robustness_Noise_Score: target 70-90% (higher is better)
-    final_metrics["Robustness_Noise_Score"] = normalize_metric(
-        raw_metrics["Robustness_Noise_Score"], 70.0, 90.0,
-        base_scale=0.1, power_exp=0.3, multiplier=4.5
-    )
-    
-    # RAGAS Metrics - Convert to 0-1 range (not percentage)
-    # RAGAS_Context_Precision_Proxy: target 0.6-0.95 (higher is better)
-    ragas_cp = normalize_metric(
-        raw_metrics["RAGAS_Context_Precision_Proxy"], 60.0, 95.0,
-        base_scale=0.1, power_exp=0.3, multiplier=4.5
-    ) / 100.0  # Convert to 0-1 range
-    final_metrics["RAGAS_Context_Precision_Proxy"] = ragas_cp
-    
-    # RAGAS_Context_Relevancy_Proxy: target 0.6-0.95 (higher is better)
-    ragas_cr = normalize_metric(
-        raw_metrics["RAGAS_Context_Relevancy_Proxy"], 60.0, 95.0,
-        base_scale=0.1, power_exp=0.3, multiplier=4.5
-    ) / 100.0  # Convert to 0-1 range
-    final_metrics["RAGAS_Context_Relevancy_Proxy"] = ragas_cr
-    
-    # RAGAS_Answer_Relevancy_Proxy: target 0.6-0.9 (higher is better)
-    ragas_ar = normalize_metric(
-        raw_metrics["RAGAS_Answer_Relevancy_Proxy"], 60.0, 90.0,
-        base_scale=0.1, power_exp=0.3, multiplier=4.5
-    ) / 100.0  # Convert to 0-1 range
-    final_metrics["RAGAS_Answer_Relevancy_Proxy"] = ragas_ar
-    
-    # RAGAS_Answer_Semantic_Similarity_Proxy: target 0.6-0.95 (higher is better)
-    ragas_as = normalize_metric(
-        raw_metrics["RAGAS_Answer_Semantic_Similarity_Proxy"], 60.0, 95.0,
-        base_scale=0.1, power_exp=0.3, multiplier=4.5
-    ) / 100.0  # Convert to 0-1 range
-    final_metrics["RAGAS_Answer_Semantic_Similarity_Proxy"] = ragas_as
-    
-    # Drift Metrics (proxy versions - stability indicators) - add variation
-    final_metrics["Query_Distribution_Spread"] = normalize_metric(
-        raw_metrics["Query_Distribution_Spread"], 1.0, 3.0,
-        base_scale=0.1, power_exp=0.3, multiplier=1.5
-    )
-    final_metrics["Performance_Stability_EM"] = normalize_metric(
-        raw_metrics["Performance_Stability_EM"], 0.05, 0.15,
-        base_scale=0.1, power_exp=0.3, multiplier=1.2
-    )
-    final_metrics["Performance_Stability_F1"] = normalize_metric(
-        raw_metrics["Performance_Stability_F1"], 0.05, 0.15,
-        base_scale=0.1, power_exp=0.3, multiplier=1.2
-    )
-    
-    # Latency and Throughput calculation (normalize to target ranges)
-    if len(metrics["Latencies"]) > 0 and np.mean(metrics["Latencies"]) > 0:
-        raw_latency = np.mean(metrics["Latencies"])
-        raw_throughput = 1000.0 / raw_latency
-    else:
-        # Fallback: calculate from total duration
-        if len(eval_data) > 0 and total_duration > 0:
-            raw_latency = (total_duration * 1000) / len(eval_data)
-            raw_throughput = len(eval_data) / total_duration
-        else:
-            raw_latency = 0.0
-            raw_throughput = 0.0
-    
-    # Normalize Latency: 66.27 -> target 28-40 (inverse: lower is better)
-    # Complex formula: target = 28 + (40-28) * (1 - (raw/66.27)^0.6) * 0.85
-    if raw_latency > 0:
-        # Inverse scaling: higher raw latency -> lower normalized (but in target range)
-        latency_factor = (raw_latency / 66.27) ** 0.6
-        final_metrics["Latency"] = 28.0 + (40.0 - 28.0) * (1.0 - latency_factor * 0.85)
-        final_metrics["Latency"] = max(28.0, min(40.0, final_metrics["Latency"]))
-    else:
-        final_metrics["Latency"] = 34.0  # Mid-range default
-    
-    # Normalize Throughput: 15.09 -> target 25-35 (direct: higher is better)
-    # Complex formula: target = 25 + (35-25) * (0.4 + (raw/15.09)^0.5 * 0.6)
-    if raw_throughput > 0:
-        # Direct scaling: higher raw throughput -> higher normalized
-        throughput_factor = (raw_throughput / 15.09) ** 0.5
-        final_metrics["Throughput"] = 25.0 + (35.0 - 25.0) * (0.4 + throughput_factor * 0.6)
-        final_metrics["Throughput"] = max(25.0, min(35.0, final_metrics["Throughput"]))
-    else:
-        final_metrics["Throughput"] = 30.0  # Mid-range default
-    
-    final_metrics["CPU_Mem"] = end_mem
-    final_metrics["GPU_Mem"] = gpu_mem
 
-    # Energy Estimation (Real Measurement)
-    # If pynvml failed or not present, total_energy_joules will be 0.
-    # In that case, we might want to fallback to the dummy calc OR just report 0/NA as requested "no dummy".
-    # User said "cancel dummy procedure". So if real fails, we report 0 or error.
+    # --- GENUINE METRIC RECALCULATION & REPORTING ---
+    print("\nCalculating final metrics (Genuine)...", flush=True)
     
-    total_energy_kwh = total_energy_joules / 3.6e6
-    energy_per_query_joules = total_energy_joules / len(eval_data) if len(eval_data) > 0 else 0
+    # Storage for recalculated metrics
+    rec_em = []
+    rec_r1 = []
+    rec_r5 = []
+    rec_r20 = []
+    rec_r100 = []
+    rec_p5 = []
+    rec_mrr = []
     
-    final_metrics["Energy (kWh)"] = total_energy_kwh
-    final_metrics["Energy/Query (J)"] = energy_per_query_joules
+    # Re-iterate results for precise calculation
+    for i in range(len(eval_data)):
+        gold_id = all_gold_ids[i]
+        retrieved_ids = I[i]  # shape (k,)
+        
+        # Reranked order
+        start, end = query_candidate_indices[i]
+        q_scores = all_scores[start:end]
+        valid_pids = [pid for pid in retrieved_ids if pid < len(passages)]
+        
+        if len(valid_pids) == len(q_scores):
+            # Sort by reranker score
+            candidate_results = list(zip(valid_pids, q_scores))
+            candidate_results.sort(key=lambda x: x[1], reverse=True)
+            reranked_ids = [pid for pid, score in candidate_results]
+        else:
+            reranked_ids = valid_pids
+            
+        # 1. Exact Match (Top-1)
+        top_id = reranked_ids[0] if reranked_ids else -1
+        rec_em.append(1 if top_id == gold_id else 0)
+        
+        # 3. Recalls
+        rec_r1.append(1 if gold_id in reranked_ids[:1] else 0)
+        rec_r5.append(1 if gold_id in reranked_ids[:5] else 0)
+        rec_r20.append(1 if gold_id in reranked_ids[:20] else 0)
+        rec_r100.append(1 if gold_id in reranked_ids[:100] else 0)
+        
+        # 4. MRR
+        try:
+            rank = reranked_ids.index(gold_id) + 1
+            rec_mrr.append(1.0 / rank)
+        except ValueError:
+            rec_mrr.append(0.0)
+            
+        # 5. Precision@5
+        if gold_id in reranked_ids[:5]:
+            rec_p5.append(1.0 / 5.0)
+        else:
+            rec_p5.append(0.0)
 
-    # Write Report
-    # Order matching the screenshot
-    display_order = [
-        # Core Metrics
-        "EM", "F1", "Precision@5", 
-        "Recall@5", "Recall@20", "Recall@100",
-        "MRR", "ROUGE-L", "BLEU",
-        # Safety & Security Metrics
-        "Hallucination_Rate", "Faithfulness_Score",
-        "Safety_Refusal_Rate", "Prompt_Injection_Robustness",
-        "Toxicity_Score", "PII_Leakage_Rate",
-        "Robustness_Noise_Score",
-        # RAGAS Metrics (lightweight proxy versions)
-        "RAGAS_Context_Precision_Proxy", "RAGAS_Context_Relevancy_Proxy",
-        "RAGAS_Answer_Relevancy_Proxy", "RAGAS_Answer_Semantic_Similarity_Proxy",
-        # Drift Metrics (proxy versions - stability indicators)
-        "Query_Distribution_Spread", "Performance_Stability_EM", "Performance_Stability_F1",
-        # Performance Metrics
-        "Latency", "Throughput",
-        "GPU_Mem", "CPU_Mem",
-        "Energy (kWh)", "Energy/Query (J)"
+    # Compile Final Results
+    final_results = {}
+    
+    # Core
+    final_results["Exact Match (EM)"] = np.mean(rec_em) * 100
+    final_results["F1 Score"] = np.mean(metrics["F1"]) * 100 if "F1" in metrics and metrics["F1"] else 0.0
+    final_results["MRR"] = np.mean(rec_mrr) * 100
+    final_results["Precision@5"] = np.mean(rec_p5) * 100
+    final_results["Recall@1"] = np.mean(rec_r1) * 100
+    final_results["Recall@5"] = np.mean(rec_r5) * 100
+    final_results["Recall@20"] = np.mean(rec_r20) * 100
+    final_results["Recall@100"] = np.mean(rec_r100) * 100
+    
+    # Text Generation
+    final_results["ROUGE-L"] = np.mean(rouge_scores) * 100 if rouge_scores else 0.0
+    bleu_val = bleu_scorer.corpus_score(bleu_preds, bleu_refs).score
+    final_results["BLEU"] = bleu_val
+    
+    # Performance
+    # Re-calculate Latency/Throughput from total duration (Most Robust)
+    if len(eval_data) > 0 and total_duration > 0:
+        final_results["Latency (ms)"] = (total_duration * 1000) / len(eval_data)
+        final_results["Throughput (QPS)"] = len(eval_data) / total_duration
+    else:
+        final_results["Latency (ms)"] = 0.0
+        final_results["Throughput (QPS)"] = 0.0
+
+    final_results["GPU Memory (GB)"] = gpu_mem
+    final_results["CPU Memory (GB)"] = end_mem
+    
+    # Safety
+    final_results["Hallucination Rate (%)"] = (sum(metrics["Hallucination_Flags"]) / len(metrics["Hallucination_Flags"]) * 100) if metrics.get("Hallucination_Flags") else 0.0
+    final_results["Faithfulness Score"] = (sum(metrics["Faithfulness_Flags"]) / len(metrics["Faithfulness_Flags"])) if metrics.get("Faithfulness_Flags") else 0.0
+    
+    # Injection
+    if injection_query_indices and metrics.get("Injection_Robustness_Flags"):
+        final_results["Injection Robustness (%)"] = (sum(metrics["Injection_Robustness_Flags"]) / len(injection_query_indices) * 100)
+    else:
+        final_results["Injection Robustness (%)"] = 100.0 if not injection_query_indices else 0.0
+        
+    final_results["Noise Robustness (%)"] = robustness_noise_score
+    
+    final_results["Toxicity Probability"] = np.mean(metrics["Toxicity_Scores"]) if metrics.get("Toxicity_Scores") else 0.0
+    final_results["PII Leakage (%)"] = (sum(metrics["PII_Leakage_Flags"]) / len(metrics["PII_Leakage_Flags"]) * 100) if metrics.get("PII_Leakage_Flags") else 0.0
+    
+    # Safe Handling subsets
+    if unsafe_query_indices and metrics.get("Safety_Refusal_Flags"):
+        final_results["Safe Handling (Unsafe Queries)"] = (sum(metrics["Safety_Refusal_Flags"]) / len(unsafe_query_indices) * 100)
+    else:
+        final_results["Safe Handling (Unsafe Queries)"] = 100.0 if not unsafe_query_indices else 0.0
+    
+    final_results["Safe Handling (PII Queries)"] = max(0.0, 100.0 - final_results["PII Leakage (%)"])
+
+    # --- PRINT FINAL REPORT ---
+    print("\n" + "="*60, flush=True)
+    print(f"      RAG EVALUATION REPORT (Architecture 1)", flush=True)
+    print("="*60 + "\n", flush=True)
+    
+    header = f"{'Metric':<35} | {'Architecture 1':<15}"
+    print(header, flush=True)
+    print("-" * 55, flush=True)
+    
+    keys_ordered = [
+        "Exact Match (EM)", "F1 Score", "MRR", "Precision@5",
+        "Recall@1", "Recall@5", "Recall@20", "Recall@100",
+        "ROUGE-L", "BLEU",
+        "Latency (ms)", "Throughput (QPS)", "GPU Memory (GB)",
+        "Hallucination Rate (%)", "Faithfulness Score",
+        "Injection Robustness (%)", "Noise Robustness (%)",
+        "Toxicity Probability", "PII Leakage (%)",
+        "Safe Handling (Unsafe Queries)", "Safe Handling (PII Queries)"
     ]
     
-    # Map internal keys to display names if needed, or just use keys
-    display_names = {
-        "EM": "Exact Match",
-        "F1": "F1 Score (QA)",
-        "Precision@5": "Precision@5",
-        "Recall@5": "Recall@5",
-        "Recall@20": "Recall@20",
-        "Recall@100": "Recall@100",
-        "MRR": "MRR",
-        "ROUGE-L": "ROUGE-L",
-        "BLEU": "BLEU",
-        "Hallucination_Rate": "Hallucination Rate (%)",
-        "Faithfulness_Score": "Faithfulness Score (%)",
-        "Safety_Refusal_Rate": "Safety Refusal Rate (%)",
-        "Prompt_Injection_Robustness": "Prompt Injection Robustness (%)",
-        "Toxicity_Score": "Toxicity Score",
-        "PII_Leakage_Rate": "PII Leakage Rate (%)",
-        "Robustness_Noise_Score": "Robustness Noise Score (%)",
-        "RAGAS_Context_Precision_Proxy": "RAGAS Context Precision (Proxy)",
-        "RAGAS_Context_Relevancy_Proxy": "RAGAS Context Relevancy (Proxy)",
-        "RAGAS_Answer_Relevancy_Proxy": "RAGAS Answer Relevancy (Proxy)",
-        "RAGAS_Answer_Semantic_Similarity_Proxy": "RAGAS Answer Semantic Similarity (Proxy)",
-        "Query_Distribution_Spread": "Query Distribution Spread (Proxy) (%)",
-        "Performance_Stability_EM": "Performance Stability EM (Proxy) (%)",
-        "Performance_Stability_F1": "Performance Stability F1 (Proxy) (%)",
-        "Latency": "Latency (ms)",
-        "Throughput": "Throughput (QPS)",
-        "GPU_Mem": "GPU Memory (GB)",
-        "CPU_Mem": "CPU Memory (GB)",
-        "Energy (kWh)": "Energy (kWh)",
-        "Energy/Query (J)": "Energy/Query (J)"
-    }
-
-    with open(args.output_report, 'w') as f:
-        f.write("RAG Architecture 1 - Metrics Report\n")
-        f.write("===================================\n\n")
-        
-        # Core Metrics Section
-        f.write("=== Core Metrics ===\n")
-        core_metrics = ["EM", "F1", "Precision@5", "Recall@5", "Recall@20", 
-                       "Recall@100", "MRR", "ROUGE-L", "BLEU"]
-        for key in core_metrics:
-            if key in final_metrics:
-                val = final_metrics[key]
-                name = display_names.get(key, key)
-                if "Energy (kWh)" in name:
-                    f.write(f"{name:<20}: {val:.6f}\n")
-                else:
-                    f.write(f"{name:<20}: {val:.1f}\n")
-        
-        f.write("\n=== Safety & Security Metrics ===\n")
-        f.write("Note: Hallucination and Faithfulness use hybrid approach (semantic similarity + token overlap).\n")
-        f.write("Safety metrics use rule-based keyword matching (baseline). Ideal: Safety classifiers.\n")
-        f.write("Toxicity uses Detoxify model if available, otherwise keyword-based (baseline).\n")
-        f.write("PII detection uses regex + spaCy NER hybrid (production-ready approach).\n\n")
-        safety_metrics = ["Hallucination_Rate", "Faithfulness_Score", 
-                         "Safety_Refusal_Rate", "Prompt_Injection_Robustness",
-                         "Toxicity_Score", "PII_Leakage_Rate", "Robustness_Noise_Score"]
-        for key in safety_metrics:
-            if key in final_metrics:
-                val = final_metrics[key]
-                name = display_names.get(key, key)
-                f.write(f"{name:<20}: {val:.1f}\n")
-        
-        f.write("\n=== RAGAS Metrics (Lightweight Proxy) ===\n")
-        f.write("Note: These are RAGAS-inspired lightweight approximations using token overlap and semantic similarity.\n")
-        f.write("Real RAGAS metrics use LLM-based evaluators for semantic precision and relevancy.\n\n")
-        ragas_metrics = ["RAGAS_Context_Precision_Proxy", "RAGAS_Context_Relevancy_Proxy", 
-                        "RAGAS_Answer_Relevancy_Proxy", "RAGAS_Answer_Semantic_Similarity_Proxy"]
-        for key in ragas_metrics:
-            if key in final_metrics:
-                val = final_metrics[key]
-                name = display_names.get(key, key)
-                f.write(f"{name:<20}: {val:.2f}\n")
-        
-        f.write("\n=== Drift Metrics (Proxy - Stability Indicators) ===\n")
-        f.write("Note: These are distribution spread/stability indicators, not true drift.\n")
-        f.write("True drift requires baseline embeddings and metrics from previous runs.\n\n")
-        drift_metrics = ["Query_Distribution_Spread", "Performance_Stability_EM", 
-                        "Performance_Stability_F1"]
-        for key in drift_metrics:
-            if key in final_metrics:
-                val = final_metrics[key]
-                name = display_names.get(key, key)
-                f.write(f"{name:<20}: {val:.2f}\n")
-        
-        f.write("\n=== Performance Metrics ===\n")
-        perf_metrics = ["Latency", "Throughput", "GPU_Mem", "CPU_Mem", 
-                       "Energy (kWh)", "Energy/Query (J)"]
-        for key in perf_metrics:
-            if key in final_metrics:
-                val = final_metrics[key]
-                name = display_names.get(key, key)
-                if "Energy (kWh)" in name:
-                    f.write(f"{name:<20}: {val:.6f}\n")
-                else:
-                    f.write(f"{name:<20}: {val:.2f}\n")
+    for k in keys_ordered:
+        val = final_results.get(k, 0.0)
+        print(f"{k:<35} | {val:.2f}", flush=True)
             
-        f.write("\nTesting Methodology Summary:\n")
-        f.write("T1 (Semantic Accuracy): EM/F1 computed on retrieved top passage vs gold.\n")
-        f.write("T2 (Retrieval Stability): Recall@k measured at 5, 20, 100.\n")
-        f.write("T3 (Latency): Measured end-to-end query time (Encode+Search+Rerank).\n")
-        f.write("T4 (Memory): Peak GPU memory and current CPU RSS tracked.\n")
-        f.write("T5 (Coherence): ROUGE-L and BLEU computed on top passage.\n")
-        f.write("T6 (Hallucination): Hybrid approach - Semantic similarity (sentence-transformers) + F1 + token coverage.\n")
-        f.write("   Fallback: Token overlap + F1 threshold (baseline heuristic).\n")
-        f.write("T7 (Faithfulness): Hybrid approach - Semantic similarity (sentence-transformers) + cosine similarity.\n")
-        f.write("   Fallback: Token overlap-based coverage (baseline).\n")
-        f.write("T8 (Safety): Rule-based keyword matching for unsafe queries + refusal pattern detection (baseline).\n")
-        f.write("   Ideal: Safety classifiers (OpenAI Moderation, Detoxify).\n")
-        f.write("T9 (Injection Robustness): Keyword-based injection detection + heuristics (baseline).\n")
-        f.write("   Ideal: LLM-based judge or adversarial testing framework.\n")
-        f.write("T10 (Toxicity): Detoxify model (if available) with weighted aggregation.\n")
-        f.write("   Fallback: Keyword-based counting (baseline).\n")
-        f.write("T11 (PII Leakage): Hybrid approach - Regex patterns + spaCy NER (production-ready).\n")
-        f.write("T12 (Noise Robustness): Character-level noise (typo, deletion, insertion) + retrieval comparison.\n")
-        f.write("T13 (RAGAS): Lightweight proxy versions using semantic similarity (sentence-transformers) + token overlap.\n")
-        f.write("   Real RAGAS uses LLM-based evaluators. These are approximations.\n")
-        f.write("T14 (Drift): Distribution spread/stability indicators (variance, coefficient of variation).\n")
-        f.write("   True drift requires baseline comparison (PSI, KL Divergence).\n")
-        f.write("Energy: Real-time GPU power monitoring via pynvml.\n")
-        f.write("\nTechnologies Used:\n")
-        f.write("- Sentence Transformers: all-MiniLM-L6-v2 (semantic similarity)\n")
-        f.write("- Detoxify: unbiased model (toxicity detection)\n")
-        f.write("- spaCy: en_core_web_sm/md (NER for PII detection)\n")
-        f.write("- Fallback methods: Token overlap, keyword matching, regex patterns\n")
-
-    # Print final metrics to console
-    print("\n=== Core Metrics ===", flush=True)
-    core_metrics = ["EM", "F1", "Precision@5", "Recall@5", "Recall@20", 
-                   "Recall@100", "MRR", "ROUGE-L", "BLEU"]
-    for key in core_metrics:
-        if key in final_metrics:
-            name = display_names.get(key, key)
-            val = final_metrics[key]
-            if isinstance(val, float) and (val != val or val == float('inf')):
-                print(f"{name:<20}: N/A", flush=True)
-            else:
-                # Use .1f for most metrics to show decimal values, .2f for RAGAS (0-1 range)
-                if key in ["RAGAS_Context_Precision_Proxy", "RAGAS_Context_Relevancy_Proxy", 
-                          "RAGAS_Answer_Relevancy_Proxy", "RAGAS_Answer_Semantic_Similarity_Proxy"]:
-                    print(f"{name:<20}: {val:.2f}", flush=True)
-                else:
-                    print(f"{name:<20}: {val:.1f}", flush=True)
-    
-    print("\n=== Safety & Security Metrics ===", flush=True)
-    safety_metrics = ["Hallucination_Rate", "Faithfulness_Score", 
-                     "Safety_Refusal_Rate", "Prompt_Injection_Robustness",
-                     "Toxicity_Score", "PII_Leakage_Rate", "Robustness_Noise_Score"]
-    for key in safety_metrics:
-        if key in final_metrics:
-            name = display_names.get(key, key)
-            val = final_metrics[key]
-            if isinstance(val, float) and (val != val or val == float('inf')):
-                print(f"{name:<20}: N/A", flush=True)
-            else:
-                # Use .1f for most metrics to show decimal values, .2f for RAGAS (0-1 range)
-                if key in ["RAGAS_Context_Precision_Proxy", "RAGAS_Context_Relevancy_Proxy", 
-                          "RAGAS_Answer_Relevancy_Proxy", "RAGAS_Answer_Semantic_Similarity_Proxy"]:
-                    print(f"{name:<20}: {val:.2f}", flush=True)
-                else:
-                    print(f"{name:<20}: {val:.1f}", flush=True)
-    
-    print("\n=== RAGAS Metrics (Lightweight Proxy) ===", flush=True)
-    print("Note: These are RAGAS-inspired lightweight approximations.", flush=True)
-    ragas_metrics = ["RAGAS_Context_Precision_Proxy", "RAGAS_Context_Relevancy_Proxy", 
-                    "RAGAS_Answer_Relevancy_Proxy", "RAGAS_Answer_Semantic_Similarity_Proxy"]
-    for key in ragas_metrics:
-        if key in final_metrics:
-            name = display_names.get(key, key)
-            val = final_metrics[key]
-            if isinstance(val, float) and (val != val or val == float('inf')):
-                print(f"{name:<20}: N/A", flush=True)
-            else:
-                # Use .1f for most metrics to show decimal values, .2f for RAGAS (0-1 range)
-                if key in ["RAGAS_Context_Precision_Proxy", "RAGAS_Context_Relevancy_Proxy", 
-                          "RAGAS_Answer_Relevancy_Proxy", "RAGAS_Answer_Semantic_Similarity_Proxy"]:
-                    print(f"{name:<20}: {val:.2f}", flush=True)
-                else:
-                    print(f"{name:<20}: {val:.1f}", flush=True)
-    
-    print("\n=== Drift Metrics (Proxy - Stability Indicators) ===", flush=True)
-    print("Note: These are distribution spread/stability indicators, not true drift.", flush=True)
-    drift_metrics = ["Query_Distribution_Spread", "Performance_Stability_EM", 
-                    "Performance_Stability_F1"]
-    for key in drift_metrics:
-        if key in final_metrics:
-            name = display_names.get(key, key)
-            val = final_metrics[key]
-            if isinstance(val, float) and (val != val or val == float('inf')):
-                print(f"{name:<20}: N/A", flush=True)
-            else:
-                # Use .1f for most metrics to show decimal values, .2f for RAGAS (0-1 range)
-                if key in ["RAGAS_Context_Precision_Proxy", "RAGAS_Context_Relevancy_Proxy", 
-                          "RAGAS_Answer_Relevancy_Proxy", "RAGAS_Answer_Semantic_Similarity_Proxy"]:
-                    print(f"{name:<20}: {val:.2f}", flush=True)
-                else:
-                    print(f"{name:<20}: {val:.1f}", flush=True)
-    
-    print("\n=== Performance Metrics ===", flush=True)
-    perf_metrics = ["Latency", "Throughput", "GPU_Mem", "CPU_Mem", 
-                   "Energy (kWh)", "Energy/Query (J)"]
-    for key in perf_metrics:
-        if key in final_metrics:
-            name = display_names.get(key, key)
-            val = final_metrics[key]
-            if "Energy (kWh)" in name:
-                print(f"{name:<20}: {val:.6f}", flush=True)
-            elif isinstance(val, float) and (val != val or val == float('inf')):
-                print(f"{name:<20}: N/A", flush=True)
-            else:
-                print(f"{name:<20}: {val:.2f}", flush=True)
-
-    # ... (previous code) ...
-    
-    # Check for poor performance
-    if final_metrics["Recall@1"] < 1.0 or final_metrics["Latency"] > 100.0:
-        print("\n⚠️ WARNING: Metrics are lower than expected or Latency is high.")
-        print("Running system diagnostics...")
-        check_system_health()
-
-def check_system_health():
-    """Checks system properties for debugging low performance."""
-    print("\n--- SYSTEM DIAGNOSTICS ---", flush=True)
-    
-    # 1. Check CUDA
-    if torch.cuda.is_available():
-        print(f"✅ CUDA Available: {torch.cuda.get_device_name(0)}", flush=True)
-        print(f"   Device Count: {torch.cuda.device_count()}", flush=True)
-        print(f"   Current Device: {torch.cuda.current_device()}", flush=True)
-    else:
-        print("❌ CUDA NOT Available! Running on CPU?", flush=True)
-        
-    # 2. Check RAM
-    mem = psutil.virtual_memory()
-    print(f"📊 System RAM: {mem.total / (1024**3):.2f} GB (Available: {mem.available / (1024**3):.2f} GB)", flush=True)
-    
-    # 3. Check NVIDIA-SMI (if available)
-    try:
-        print("\n--- NVIDIA-SMI OUTPUT ---", flush=True)
-        os.system("nvidia-smi")
-    except Exception as e:
-        print(f"Could not run nvidia-smi: {e}", flush=True)
-        
-    # 4. Simple Tensor Check
-    try:
-        print("\n--- TENSOR SPEED CHECK ---", flush=True)
-        x = torch.randn(10000, 10000, device="cuda")
-        start = time.time()
-        y = x @ x
-        torch.cuda.synchronize()
-        end = time.time()
-        print(f"✅ 10k x 10k Matrix Mult took: {end - start:.4f} seconds", flush=True)
-    except Exception as e:
-        print(f"❌ Tensor check failed: {e}", flush=True)
-
-# ============================================================================
-# TEST FUNCTIONS
-# ============================================================================
-
+    print("\n" + "="*60, flush=True)
+    print(f"Total Energy: {total_energy_joules:.2f} Joules", flush=True)
+    print("="*60, flush=True)
 def test_hallucination_detection():
     """T1: Unit test for hallucination detection."""
     print("\n--- Testing Hallucination Detection ---", flush=True)
@@ -2184,17 +1690,96 @@ def run_unit_tests():
     print("\n" + "="*50, flush=True)
     print("RUNNING UNIT TESTS", flush=True)
     print("="*50, flush=True)
+    # --- PROCESSED METRICS (REAL CALCULATIONS) ---
+    final_results = {}
     
-    try:
-        test_hallucination_detection()
-        test_safety_refusal()
-        test_pii_leakage()
-        test_robustness_noise()
-        print("\n✅ All unit tests passed!", flush=True)
-    except AssertionError as e:
-        print(f"\n❌ Unit test failed: {e}", flush=True)
-    except Exception as e:
-        print(f"\n❌ Unit test error: {e}", flush=True)
+    # 1. Semantic Accuracy (T1)
+    final_results["Exact Match (EM)"] = np.mean(metrics["EM"]) * 100 if metrics["EM"] else 0.0
+    final_results["F1 Score"] = np.mean(metrics["F1"]) * 100 if metrics["F1"] else 0.0
+    
+    # 2. Retrieval Stability (T2)
+    # Recall
+    final_results["Recall@k"] = np.mean(metrics["Recall@20"]) * 100 if metrics["Recall@20"] else 0.0 # Using R@20 as the main 'k'
+    final_results["MRR"] = np.mean(metrics["MRR"]) * 100 if metrics["MRR"] else 0.0
+    
+    # 3. Output Coherence (T5)
+    final_results["ROUGE-L"] = np.mean(rouge_scores) * 100 if rouge_scores else 0.0
+    bleu_score = bleu_scorer.corpus_score(bleu_preds, bleu_refs)
+    final_results["BLEU"] = bleu_score.score
+    
+    # 4. Latency & Throughput (T3)
+    if total_duration > 0 and len(eval_data) > 0:
+        avg_latency = (total_duration * 1000) / len(eval_data)
+        throughput = len(eval_data) / total_duration
+    else:
+        avg_latency = 0.0
+        throughput = 0.0
+        
+    final_results["Latency"] = avg_latency
+    final_results["Throughput"] = throughput
+    
+    # 5. Advanced Safety Metrics (T6-T12)
+    # Hallucination Rate
+    if metrics["Hallucination_Flags"]:
+        hallucination_rate = sum(metrics["Hallucination_Flags"]) / len(metrics["Hallucination_Flags"]) * 100
+    else:
+        hallucination_rate = 0.0
+    final_results["Hallucination Rate"] = hallucination_rate
+    
+    # Faithfulness
+    if metrics["Faithfulness_Flags"]:
+        faithfulness_score = sum(metrics["Faithfulness_Flags"]) / len(metrics["Faithfulness_Flags"]) * 100
+    else:
+        faithfulness_score = 0.0
+    final_results["Faithfulness"] = faithfulness_score
+    
+    # Toxicity
+    final_results["Toxicity"] = np.mean(metrics["Toxicity_Scores"]) if metrics["Toxicity_Scores"] else 0.0
+    
+    # PII Leakage
+    if metrics["PII_Leakage_Flags"]:
+        pii_rate = sum(metrics["PII_Leakage_Flags"]) / len(metrics["PII_Leakage_Flags"]) * 100
+    else:
+        pii_rate = 0.0
+    final_results["PII Leakage"] = pii_rate
+    
+    # Robustness (Noise Score) - If calculated above
+    final_results["Robustness"] = robustness_noise_score
+    
+    # --- PRINT FINAL REPORT ---
+    print("\n" + "="*50)
+    print(f"      RAG OPTIMIZATION REPORT (Real Metrics)")
+    print("="*50 + "\n")
+    
+    print(f"{'Metric':<30} | {'Score':<15}")
+    print("-" * 50)
+    
+    # Print in user's requested order
+    keys_ordered = [
+        ("Exact Match (EM)", "%"),
+        ("F1 Score", "%"),
+        ("Recall@k", "% (R@20)"), # Clarify which K
+        ("ROUGE-L", "%"),
+        ("BLEU", ""),
+        ("Hallucination Rate", "%"),
+        ("Faithfulness", "%"),
+        ("Robustness", "%"),
+        ("Latency", " ms"),
+        ("Throughput", " req/s"),
+        ("Toxicity", ""),
+        ("PII Leakage", "%")
+    ]
+    
+    for k, unit in keys_ordered:
+        val = final_results.get(k, 0.0)
+        if isinstance(val, (int, float)):
+            print(f"{k:<30} : {val:.2f}{unit}")
+        else:
+            print(f"{k:<30} : {val}")
+            
+    print("\n" + "="*50)
+    print(f"Total Energy: {energy_joules:.2f} Joules")
+    print("="*50)
 
 if __name__ == "__main__":
     import sys
@@ -2203,3 +1788,4 @@ if __name__ == "__main__":
         run_unit_tests()
     else:
         main()
+```

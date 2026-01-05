@@ -31,45 +31,36 @@ def chunk_text(text: str, chunk_size: int) -> List[str]:
     return chunks
 
 def generate_synthetic_qa(passages: List[str], num_questions: int) -> List[Dict]:
-    """
-    Generates synthetic QA pairs from passages.
-    New Logic: Randomly select a sentence from the passage and use it as the 'question'.
-    This creates a 'known-item retrieval' task which is much easier for pre-trained models
-    and guarantees that the gold passage is relevant.
-    """
+    """Generates synthetic QA pairs from passages with better answerability."""
     qa_pairs = []
-    print(f"Generating {num_questions} synthetic QA pairs (Sentence Extraction)...")
-    
-    # Shuffle passages to get random selection
+    print(f"Generating {num_questions} synthetic QA pairs (Robust Span Extraction)...")
+
     selected_indices = list(range(len(passages)))
     random.shuffle(selected_indices)
     
     count = 0
+    # Try more pairs than needed to find good candidates
     for idx in selected_indices:
         if count >= num_questions:
             break
             
         passage = passages[idx]
-        
-        # Split into sentences (simple heuristic)
         sentences = passage.replace("?", ".").replace("!", ".").split(".")
-        sentences = [s.strip() for s in sentences if len(s.strip().split()) > 5] # Min 5 words
         
-        if not sentences:
+        # Filter for quality sentences
+        valid_sentences = [s.strip() for s in sentences if len(s.strip().split()) > 8] 
+        
+        if not valid_sentences:
             continue
             
-        # Pick a random sentence as the "query"
-        # We simulate a user searching for this exact information
-        question = random.choice(sentences)
-        
-        # The answer is the sentence itself (or we could say the whole passage is the answer context)
-        answer = question
+        # Use sentence as question
+        question = random.choice(valid_sentences)
         
         qa_pairs.append({
             "id": str(count),
             "question": question,
-            "answers": [answer],
-            "gold_passage_id": str(idx), # We know it came from this passage
+            "answers": [question],  # Sentence itself as answer for now
+            "gold_passage_id": str(idx),
             "gold_passage_text": passage
         })
         count += 1

@@ -92,8 +92,8 @@ def encode_query(query: str, device: str = "cuda") -> np.ndarray:
 
 def main():
     parser = argparse.ArgumentParser(description="Generate DPR Embeddings")
-    parser.add_argument("--passages-txt", type=str, required=True, help="Path to passages.txt")
-    parser.add_argument("--output-embeddings", type=str, required=True, help="Path to output .npy file")
+    parser.add_argument("--passages-txt", type=str, default="indexes/passages.txt", help="Path to passages.txt")
+    parser.add_argument("--output-embeddings", type=str, default="indexes/passage_emb.npy", help="Path to output .npy file")
     parser.add_argument("--batch-size", type=int, default=CONFIG["DEFAULT_BATCH_SIZE"], help="Batch size")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device (cuda/cpu)")
     parser.add_argument(

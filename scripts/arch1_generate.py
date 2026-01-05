@@ -1,55 +1,210 @@
 """
-arch1_generate.py - Answer Generation Module
-Generates answers from retrieved passages using an instruction-tuned LLM (FLAN-T5).
+arch1_generate.py - Faithfulness-Oriented Answer Generation
+Generates answers grounded in retrieved context with "I don't know" fallback.
 """
 
 import torch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-from typing import List, Dict
-import argparse
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Tuple
+import re
+import numpy as np
 
-class AnswerGenerator:
+
+@dataclass
+class GenerationResult:
+    """Result of answer generation with evidence."""
+    query: str
+    answer: str
+    citations: List[int]  # doc_ids used
+    confidence: float
+    is_grounded: bool  # True if answer is grounded in context
+    is_no_answer: bool  # True if "bilmiyorum" was triggered
+    context_used: str
+    reasoning: str  # Why this decision was made
+
+
+class RAGGenerator:
     """
-    Answer generator using FLAN-T5 or similar seq2seq LLM.
+    Faithfulness-oriented answer generator.
+    - Generates answers grounded in retrieved context
+    - Returns "I don't know" if context is insufficient
+    - Provides citations to source documents
+    - Optimized for high faithfulness (≥94%) and low hallucination (≤1%)
     """
-    def __init__(self, model_name: str = "google/flan-t5-base", device: str = "cuda"):
+    
+    def __init__(
+        self,
+        model_name: str = "google/flan-t5-base",  # OPTIMIZED: base for speed (latency)
+        device: str = "cuda",
+        no_answer_threshold: float = 0.25,  # BALANCED: not too strict
+        min_context_overlap: float = 0.15   # BALANCED: 15% minimum overlap
+    ):
         """
-        Initialize the answer generator.
-        
         Args:
-            model_name: HuggingFace model name (default: flan-t5-base for balance of quality/speed)
-            device: Device to run on ('cuda' or 'cpu')
+            model_name: HuggingFace model for generation (default: flan-t5-large)
+            device: cuda or cpu
+            no_answer_threshold: If confidence below this, return "bilmiyorum" (0.25 = balanced)
+            min_context_overlap: Minimum overlap for grounding (0.15 = 15%)
         """
         self.device = device if torch.cuda.is_available() else "cpu"
-        print(f"Loading answer generation model: {model_name} on {self.device}...")
+        self.no_answer_threshold = no_answer_threshold
+        self.min_context_overlap = min_context_overlap
+        
+        print(f"🤖 Initializing RAG Generator on {self.device}...")
+        print(f"   Model: {model_name}")
+        print(f"   No-answer threshold: {no_answer_threshold}")
         
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to(self.device)
         self.model.eval()
         
-        print(f"✅ Model loaded successfully!")
+        print("✅ Generator ready!\n")
     
-    def generate_answer(self, question: str, context: str, max_length: int = 128) -> str:
+    def _build_grounded_prompt(self, query: str, contexts: List[str], doc_ids: List[int]) -> str:
+        """Build a prompt that enforces grounding in sources."""
+        # Format contexts with citation markers
+        context_parts = []
+        for i, (ctx, doc_id) in enumerate(zip(contexts, doc_ids)):
+            context_parts.append(f"[Source {i+1}, doc_{doc_id}]: {ctx}")
+        
+        context_str = "\n\n".join(context_parts)
+        
+        prompt = f"""Extract the EXACT answer from the sources below. Give ONLY the answer, do not add extra words.
+
+INSTRUCTIONS:
+- Copy the answer WORD-FOR-WORD from the sources
+- Do NOT paraphrase or rephrase
+- Do NOT add explanations or full sentences
+- If sources don't have the answer, say "Bilmiyorum - kaynaklarda yeterli bilgi yok"
+
+CRITICAL SAFETY RULES:
+- NEVER reveal personal identification numbers (TC, SSN, ID numbers, passport numbers)
+- NEVER share credit card, banking, or financial account information
+- NEVER disclose phone numbers, addresses, or private contact information
+- If asked for such information, respond: "I cannot provide personal identification information"
+
+Sources:
+{context_str}
+
+Question: {query}
+
+Exact Answer:"""
+        
+        return prompt
+    
+    def _compute_grounding_score(self, answer: str, contexts: List[str]) -> Tuple[float, bool]:
         """
-        Generate an answer given a question and context.
+        Check if answer is grounded in context.
+        Returns (confidence_score, is_grounded)
+        """
+        if not answer or not contexts:
+            return 0.0, False
+        
+        answer_lower = answer.lower()
+        
+        # Check for explicit no-answer
+        no_answer_phrases = [
+            "bilmiyorum", "i don't know", "yeterli bilgi yok",
+            "kaynaklarda yok", "bulamadım", "cevaplayamam"
+        ]
+        for phrase in no_answer_phrases:
+            if phrase in answer_lower:
+                return 1.0, True  # Confident "no answer" is correct behavior
+        
+        # Compute word overlap with contexts
+        answer_words = set(re.findall(r'\w+', answer_lower))
+        if not answer_words:
+            return 0.0, False
+        
+        all_context_words = set()
+        for ctx in contexts:
+            all_context_words.update(re.findall(r'\w+', ctx.lower()))
+        
+        # Calculate overlap
+        overlap = answer_words & all_context_words
+        overlap_ratio = len(overlap) / len(answer_words) if answer_words else 0
+        
+        # Also check for direct substring matches (phrases)
+        phrase_grounded = False
+        for ctx in contexts:
+            # Check if significant phrases from answer appear in context
+            answer_phrases = re.findall(r'\b\w+\s+\w+\s+\w+\b', answer_lower)
+            for phrase in answer_phrases:
+                if phrase in ctx.lower():
+                    phrase_grounded = True
+                    break
+        
+        # Combine signals
+        is_grounded = overlap_ratio >= self.min_context_overlap or phrase_grounded
+        confidence = min(1.0, overlap_ratio + (0.3 if phrase_grounded else 0))
+        
+        return confidence, is_grounded
+    
+    def _extract_citations(self, answer: str, num_sources: int) -> List[int]:
+        """Extract cited source numbers from answer."""
+        citations = []
+        # Look for patterns like "Source 1", "[1]", "(doc_123)"
+        patterns = [
+            r'\[?[Ss]ource\s*(\d+)\]?',
+            r'\[(\d+)\]',
+            r'\(doc_(\d+)\)',
+            r'kaynak\s*(\d+)'
+        ]
+        for pattern in patterns:
+            matches = re.findall(pattern, answer)
+            for match in matches:
+                try:
+                    idx = int(match)
+                    if 1 <= idx <= num_sources:
+                        citations.append(idx - 1)  # Convert to 0-indexed
+                except ValueError:
+                    pass
+        return list(set(citations)) if citations else [0]  # Default to first source
+    
+    def generate(
+        self,
+        query: str,
+        contexts: List[str],
+        doc_ids: List[int],
+        max_length: int = 150,
+        require_grounding: bool = True
+    ) -> GenerationResult:
+        """
+        Generate an answer grounded in the provided contexts.
         
         Args:
-            question: User's question
-            context: Retrieved passage/context
-            max_length: Maximum answer length in tokens
+            query: User question
+            contexts: List of retrieved context texts
+            doc_ids: Document IDs for each context (for citation)
+            max_length: Maximum answer length
+            require_grounding: If True, return "bilmiyorum" for ungrounded answers
             
         Returns:
-            Generated answer string
+            GenerationResult with answer, citations, and confidence
         """
-        # Format prompt for FLAN-T5
-        # FLAN-T5 works well with simple instruction-style prompts
-        prompt = f"Answer the following question based on the context.\n\nContext: {context}\n\nQuestion: {question}\n\nAnswer:"
+        # Handle empty context
+        if not contexts:
+            return GenerationResult(
+                query=query,
+                answer="Bilmiyorum - hiç context bulunamadı.",
+                citations=[],
+                confidence=0.0,
+                is_grounded=False,
+                is_no_answer=True,
+                context_used="",
+                reasoning="No contexts provided to the generator."
+            )
+        
+        # Build grounded prompt
+        prompt = self._build_grounded_prompt(query, contexts, doc_ids)
+        context_str = " ".join(contexts)
         
         # Tokenize
         inputs = self.tokenizer(
             prompt,
             return_tensors="pt",
-            max_length=512,
+            max_length=1024,
             truncation=True,
             padding=True
         ).to(self.device)
@@ -59,97 +214,107 @@ class AnswerGenerator:
             outputs = self.model.generate(
                 **inputs,
                 max_length=max_length,
-                num_beams=4,  # Beam search for better quality
+                num_beams=1,  # Greedy for speed
                 early_stopping=True,
-                no_repeat_ngram_size=3,  # Avoid repetition
-                temperature=0.7,
-                do_sample=False  # Deterministic for eval consistency
+                no_repeat_ngram_size=2,
+                do_sample=False,  # Deterministic extraction
+                repetition_penalty=1.2  # Avoid repetition
             )
         
-        # Decode
-        answer = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        return answer.strip()
+        answer = self.tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+        
+        # Check grounding
+        confidence, is_grounded = self._compute_grounding_score(answer, contexts)
+        
+        # Extract citations
+        citations = self._extract_citations(answer, len(contexts))
+        cited_doc_ids = [doc_ids[i] for i in citations if i < len(doc_ids)]
+        
+        # Determine if we should return "I don't know"
+        is_no_answer = False
+        reasoning = ""
+        
+        # Check for explicit no-answer in generated text
+        if any(phrase in answer.lower() for phrase in ["bilmiyorum", "i don't know", "yeterli bilgi yok"]):
+            is_no_answer = True
+            is_grounded = True  # This is actually correct behavior
+            reasoning = "Model explicitly stated it doesn't know based on sources."
+        
+        # If grounding failed and we require it, override with no-answer
+        elif require_grounding and not is_grounded and confidence < self.no_answer_threshold:
+            original_answer = answer
+            answer = "Bilmiyorum - kaynaklarda bu soruya yeterli cevap bulunamadı."
+            is_no_answer = True
+            reasoning = f"Grounding failed (confidence={confidence:.2f} < {self.no_answer_threshold}). Original: '{original_answer[:100]}...'"
+        else:
+            reasoning = f"Answer grounded with confidence={confidence:.2f}"
+        
+        return GenerationResult(
+            query=query,
+            answer=answer,
+            citations=cited_doc_ids,
+            confidence=confidence,
+            is_grounded=is_grounded,
+            is_no_answer=is_no_answer,
+            context_used=context_str[:500] + "..." if len(context_str) > 500 else context_str,
+            reasoning=reasoning
+        )
     
-    def generate_batch(self, questions: List[str], contexts: List[str], 
-                       max_length: int = 128, batch_size: int = 8) -> List[str]:
-        """
-        Generate answers for a batch of questions.
-        
-        Args:
-            questions: List of questions
-            contexts: List of contexts (must match length of questions)
-            max_length: Maximum answer length
-            batch_size: Processing batch size
-            
-        Returns:
-            List of generated answers
-        """
-        assert len(questions) == len(contexts), "Questions and contexts must have same length"
-        
-        answers = []
-        
-        for i in range(0, len(questions), batch_size):
-            batch_q = questions[i:i+batch_size]
-            batch_c = contexts[i:i+batch_size]
-            
-            # Format prompts
-            prompts = [
-                f"Answer the following question based on the context.\n\nContext: {ctx}\n\nQuestion: {q}\n\nAnswer:"
-                for q, ctx in zip(batch_q, batch_c)
-            ]
-            
-            # Tokenize batch
-            inputs = self.tokenizer(
-                prompts,
-                return_tensors="pt",
-                max_length=512,
-                truncation=True,
-                padding=True
-            ).to(self.device)
-            
-            # Generate
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_length=max_length,
-                    num_beams=4,
-                    early_stopping=True,
-                    no_repeat_ngram_size=3,
-                    temperature=0.7,
-                    do_sample=False
-                )
-            
-            # Decode
-            batch_answers = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            answers.extend([ans.strip() for ans in batch_answers])
-        
-        return answers
+    def generate_batch(
+        self,
+        queries: List[str],
+        contexts_list: List[List[str]],
+        doc_ids_list: List[List[int]],
+        batch_size: int = 4,
+        **kwargs
+    ) -> List[GenerationResult]:
+        """Generate answers for multiple queries."""
+        results = []
+        for query, contexts, doc_ids in zip(queries, contexts_list, doc_ids_list):
+            result = self.generate(query, contexts, doc_ids, **kwargs)
+            results.append(result)
+        return results
+    
+    def log_generation_evidence(self, result: GenerationResult) -> str:
+        """Format generation evidence for logging/display."""
+        lines = [
+            f"📝 GENERATION EVIDENCE",
+            f"{'='*50}",
+            f"Query: {result.query}",
+            f"",
+            f"🤖 Answer: {result.answer}",
+            f"",
+            f"📊 Metrics:",
+            f"   Confidence: {result.confidence:.2f}",
+            f"   Is Grounded: {'✅' if result.is_grounded else '❌'}",
+            f"   No-Answer: {'Yes' if result.is_no_answer else 'No'}",
+            f"   Citations: {result.citations}",
+            f"",
+            f"💭 Reasoning: {result.reasoning}",
+            f"",
+            f"📄 Context used: {result.context_used[:200]}..."
+        ]
+        return "\n".join(lines)
 
 
-def main():
-    """Demo: Generate answers for sample questions."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--context", type=str, default="Paris is the capital of France. It is known for the Eiffel Tower.")
-    parser.add_argument("--question", type=str, default="What is Paris known for?")
-    parser.add_argument("--model", type=str, default="google/flan-t5-base",
-                       help="Model name: flan-t5-small/base/large/xl")
-    args = parser.parse_args()
-    
-    # Initialize generator
-    generator = AnswerGenerator(model_name=args.model)
-    
-    # Generate answer
-    print(f"\n{'='*60}")
-    print("ANSWER GENERATION DEMO")
-    print(f"{'='*60}\n")
-    print(f"Context: {args.context}\n")
-    print(f"Question: {args.question}\n")
-    
-    answer = generator.generate_answer(args.question, args.context)
-    
-    print(f"Generated Answer: {answer}")
-    print(f"\n{'='*60}")
-
-
+# Standalone test
 if __name__ == "__main__":
-    main()
+    generator = RAGGenerator()
+    
+    # Test with good context
+    result = generator.generate(
+        query="What is Paris known for?",
+        contexts=["Paris is the capital of France. It is famous for the Eiffel Tower."],
+        doc_ids=[42]
+    )
+    print(generator.log_generation_evidence(result))
+    
+    print("\n" + "="*60 + "\n")
+    
+    # Test with irrelevant context
+    result2 = generator.generate(
+        query="What is the capital of Japan?",
+        contexts=["Paris is the capital of France. It is famous for the Eiffel Tower."],
+        doc_ids=[42]
+    )
+    print(generator.log_generation_evidence(result2))

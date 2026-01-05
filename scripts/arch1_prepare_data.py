@@ -3,14 +3,23 @@ import json
 import os
 import requests
 import random
-from typing import List, Dict
+from datetime import datetime
+from typing import List, Dict, Tuple
 from tqdm import tqdm
 
 CONFIG = {
+    # Natural Questions (NQ) - Simplified version from DPR
+    "NQ_TRAIN_URL": "https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-nq-train.json.gz",
+    "NQ_DEV_URL": "https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-nq-dev.json.gz",
+    # Wikipedia passages from DPR
+    "WIKI_PASSAGES_URL": "https://dl.fbaipublicfiles.com/dpr/wikipedia_split/psgs_w100.tsv.gz",
+    # Fallback: Tiny Shakespeare for demo
     "TINY_SHAKESPEARE_URL": "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
-    "CHUNK_SIZE": 100,  # words
+    "CHUNK_SIZE": 100,  # words (DPR standard)
+    "OVERLAP": 20,      # word overlap
     "EVAL_RATIO": 0.1,
-    "SEED": 42
+    "SEED": 42,
+    "USE_NQ": True      # Set to True for NQ, False for Shakespeare demo
 }
 
 def download_tiny_shakespeare(url: str) -> str:
@@ -20,15 +29,144 @@ def download_tiny_shakespeare(url: str) -> str:
     response.raise_for_status()
     return response.text
 
-def chunk_text(text: str, chunk_size: int) -> List[str]:
-    """Chunks text into passages of approximately chunk_size words."""
+
+def download_nq_dataset(url: str, output_path: str) -> str:
+    """Downloads and extracts Natural Questions dataset from DPR."""
+    import gzip
+    
+    print(f"Downloading NQ dataset from {url}...")
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
+    
+    # Save compressed file
+    gz_path = output_path + ".gz"
+    with open(gz_path, 'wb') as f:
+        for chunk in tqdm(response.iter_content(chunk_size=8192), desc="Downloading"):
+            f.write(chunk)
+    
+    # Extract
+    print("Extracting...")
+    with gzip.open(gz_path, 'rt', encoding='utf-8') as f:
+        data = f.read()
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(data)
+    
+    os.remove(gz_path)
+    print(f"Saved to {output_path}")
+    return data
+
+
+def parse_nq_data(json_path: str) -> Tuple[List[str], List[Dict]]:
+    """
+    Parse NQ dataset into passages and QA pairs.
+    Returns: (passages, qa_pairs)
+    """
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    passages = []
+    qa_pairs = []
+    passage_set = set()  # Dedup
+    
+    for item in tqdm(data, desc="Parsing NQ"):
+        question = item.get("question", "")
+        
+        # Get positive contexts (gold passages)
+        positive_ctxs = item.get("positive_ctxs", [])
+        if not positive_ctxs:
+            continue
+        
+        gold_passage = positive_ctxs[0].get("text", "")
+        gold_title = positive_ctxs[0].get("title", "")
+        
+        # Add passage if not duplicate
+        if gold_passage and gold_passage not in passage_set:
+            passage_set.add(gold_passage)
+            passages.append(gold_passage)
+        
+        # Find passage index
+        try:
+            passage_idx = passages.index(gold_passage)
+        except ValueError:
+            passage_idx = -1
+        
+        # Get answers
+        answers = item.get("answers", [])
+        if not answers:
+            continue
+        
+        qa_pairs.append({
+            "id": str(len(qa_pairs)),
+            "question": question,
+            "answers": answers,
+            "gold_passage_id": str(passage_idx),
+            "gold_passage_text": gold_passage,
+            "title": gold_title
+        })
+    
+    print(f"Parsed {len(passages)} passages, {len(qa_pairs)} QA pairs")
+    return passages, qa_pairs
+
+def chunk_text(text: str, chunk_size: int, overlap: int = 30) -> List[str]:
+    """
+    Chunks text into passages of approximately chunk_size words with overlap.
+    
+    Args:
+        text: Input text to chunk
+        chunk_size: Number of words per chunk
+        overlap: Number of overlapping words between consecutive chunks
+    """
     words = text.split()
     chunks = []
-    for i in range(0, len(words), chunk_size):
+    step = max(1, chunk_size - overlap)  # Step size = chunk_size - overlap
+    
+    for i in range(0, len(words), step):
         chunk = " ".join(words[i:i + chunk_size])
         if len(chunk.strip()) > 0:
             chunks.append(chunk)
+        # Stop if we've covered all words
+        if i + chunk_size >= len(words):
+            break
+    
     return chunks
+
+
+def deduplicate_chunks(chunks: List[str], similarity_threshold: float = 0.85) -> List[str]:
+    """
+    Remove near-duplicate chunks based on word overlap.
+    
+    Args:
+        chunks: List of text chunks
+        similarity_threshold: Jaccard similarity threshold for dedup (0-1)
+    
+    Returns:
+        Deduplicated list of chunks
+    """
+    if not chunks:
+        return chunks
+    
+    deduplicated = [chunks[0]]
+    
+    for chunk in chunks[1:]:
+        is_duplicate = False
+        chunk_words = set(chunk.lower().split())
+        
+        for existing in deduplicated:
+            existing_words = set(existing.lower().split())
+            # Jaccard similarity
+            intersection = len(chunk_words & existing_words)
+            union = len(chunk_words | existing_words)
+            similarity = intersection / union if union > 0 else 0
+            
+            if similarity >= similarity_threshold:
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            deduplicated.append(chunk)
+    
+    return deduplicated
 
 def generate_synthetic_qa(passages: List[str], num_questions: int) -> List[Dict]:
     """Generates synthetic QA pairs from passages with better answerability."""
@@ -239,6 +377,124 @@ def generate_security_test_queries() -> List[Dict]:
     
     return security_queries
 
+
+def generate_unanswerable_queries() -> List[Dict]:
+    """
+    Generate queries that have NO answer in the Shakespeare dataset.
+    Tests the system's ability to say "I don't know" when appropriate.
+    """
+    unanswerable_queries = [
+        # Out-of-domain questions (no info in Shakespeare)
+        {"question": "What is the capital of France?", "category": "out_of_domain"},
+        {"question": "When was the internet invented?", "category": "out_of_domain"},
+        {"question": "What is quantum computing?", "category": "out_of_domain"},
+        {"question": "Who won the World Cup in 2022?", "category": "out_of_domain"},
+        {"question": "What is the recipe for pizza?", "category": "out_of_domain"},
+        {"question": "How do smartphones work?", "category": "out_of_domain"},
+        {"question": "What is climate change?", "category": "out_of_domain"},
+        {"question": "Who is the president of the United States?", "category": "out_of_domain"},
+        {"question": "What is Bitcoin?", "category": "out_of_domain"},
+        {"question": "How to learn Python programming?", "category": "out_of_domain"},
+        
+        # Ambiguous questions
+        {"question": "What did he say?", "category": "ambiguous"},
+        {"question": "Tell me about it.", "category": "ambiguous"},
+        {"question": "Where did that happen?", "category": "ambiguous"},
+        {"question": "Why is that?", "category": "ambiguous"},
+        {"question": "When was this?", "category": "ambiguous"},
+        
+        # Hypothetical/speculative questions
+        {"question": "What if Romeo had not died?", "category": "hypothetical"},
+        {"question": "What would Shakespeare say about AI?", "category": "hypothetical"},
+        {"question": "What did Shakespeare eat for breakfast?", "category": "hypothetical"},
+        {"question": "How would Hamlet use social media?", "category": "hypothetical"},
+        {"question": "What if Juliet chose Paris instead?", "category": "hypothetical"},
+    ]
+    
+    result = []
+    for idx, q in enumerate(unanswerable_queries):
+        result.append({
+            "id": f"unanswerable_{idx}",
+            "question": q["question"],
+            "answers": ["Bilmiyorum"],  # Expected: system should say "I don't know"
+            "gold_passage_id": "-1",  # No gold passage
+            "gold_passage_text": "",
+            "query_type": "unanswerable",
+            "unanswerable_category": q["category"],
+            "expected_no_answer": True
+        })
+    
+    return result
+
+
+def generate_noisy_queries(base_queries: List[Dict], noise_ratio: float = 0.3) -> List[Dict]:
+    """
+    Generate noisy versions of queries to test robustness.
+    Adds typos, missing words, casing errors, etc.
+    
+    Args:
+        base_queries: Original queries to make noisy
+        noise_ratio: Fraction of queries to generate noisy versions for
+    """
+    import random
+    
+    def add_typo(text: str) -> str:
+        """Add random typo to text."""
+        if len(text) < 5:
+            return text
+        words = text.split()
+        if not words:
+            return text
+        
+        word_idx = random.randint(0, len(words) - 1)
+        word = words[word_idx]
+        if len(word) > 2:
+            # Swap two adjacent characters
+            char_idx = random.randint(0, len(word) - 2)
+            word = word[:char_idx] + word[char_idx + 1] + word[char_idx] + word[char_idx + 2:]
+            words[word_idx] = word
+        return " ".join(words)
+    
+    def remove_word(text: str) -> str:
+        """Remove random word from text."""
+        words = text.split()
+        if len(words) > 3:
+            del words[random.randint(1, len(words) - 2)]
+        return " ".join(words)
+    
+    def change_casing(text: str) -> str:
+        """Randomly change casing."""
+        return text.lower() if random.random() > 0.5 else text.upper()
+    
+    def add_extra_spaces(text: str) -> str:
+        """Add extra spaces."""
+        words = text.split()
+        return "  ".join(words)
+    
+    noise_functions = [add_typo, remove_word, change_casing, add_extra_spaces]
+    
+    noisy_queries = []
+    sample_size = int(len(base_queries) * noise_ratio)
+    sampled = random.sample(base_queries, min(sample_size, len(base_queries)))
+    
+    for idx, q in enumerate(sampled):
+        original_question = q.get("question", "")
+        noise_fn = random.choice(noise_functions)
+        noisy_question = noise_fn(original_question)
+        
+        noisy_queries.append({
+            "id": f"noisy_{idx}",
+            "question": noisy_question,
+            "original_question": original_question,
+            "answers": q.get("answers", []),
+            "gold_passage_id": q.get("gold_passage_id", "-1"),
+            "gold_passage_text": q.get("gold_passage_text", ""),
+            "query_type": "noisy",
+            "noise_type": noise_fn.__name__
+        })
+    
+    return noisy_queries
+
 def main():
     parser = argparse.ArgumentParser(description="Prepare data for RAG Arch 1")
     parser.add_argument("--output-dir", type=str, default="data", help="Output directory for JSONL files")
@@ -251,68 +507,89 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(os.path.dirname(args.output_passages_txt), exist_ok=True)
 
-    # 1. Download Data
-    raw_text = download_tiny_shakespeare(CONFIG["TINY_SHAKESPEARE_URL"])
-    
-    # 2. Process & Chunk
-    all_passages = chunk_text(raw_text, CONFIG["CHUNK_SIZE"])
-    print(f"Total passages created: {len(all_passages)}")
-    
-    # 3. Split & Format
-    # We'll use all passages for the retrieval corpus
-    # And generate questions from a subset
-    
-    target_passages = args.num_passages
-    target_questions = args.num_questions
-    
-    passages_data = []
-    
-    # If we don't have enough passages, we repeat them to reach the target
-    # This is for stress testing the architecture with the requested volume
-    current_passages = all_passages[:]
-    while len(passages_data) < target_passages:
-        needed = target_passages - len(passages_data)
+    # CHOOSE DATASET: NQ or Shakespeare
+    if CONFIG.get("USE_NQ", False):
+        print("=" * 60)
+        print("🔵 USING NATURAL QUESTIONS (NQ) DATASET")
+        print("=" * 60)
         
-        # Take what we need from current_passages (looping if needed)
-        for i, text in enumerate(current_passages):
-            if len(passages_data) >= target_passages:
-                break
-            
-            # Add a unique ID even if text is repeated
-            pid = str(len(passages_data))
+        # Download NQ dev set
+        nq_file = os.path.join(args.output_dir, "nq_dev.json")
+        if not os.path.exists(nq_file):
+            download_nq_dataset(CONFIG["NQ_DEV_URL"], nq_file)
+        
+        # Parse NQ data
+        all_passages, gold_eval_data = parse_nq_data(nq_file)
+        
+        # Limit to target size
+        all_passages = all_passages[:min(len(all_passages), args.num_passages)]
+        gold_eval_data = gold_eval_data[:min(len(gold_eval_data), args.num_questions)]
+        
+        print(f"✅ Loaded {len(all_passages)} NQ passages")
+        print(f"✅ Loaded {len(gold_eval_data)} NQ questions")
+        
+        # Create passages_data with metadata
+        passages_data = []
+        for i, text in enumerate(all_passages):
             passages_data.append({
-                "id": pid,
-                "title": f"Shakespeare Passage {pid}",
-                "text": normalize_text(text)
+                "id": str(i),
+                "title": f"NQ Passage {i}",
+                "text": normalize_text(text),
+                "doc_id": str(i),
+                "chunk_id": i,
+                "source": "natural_questions",
+                "ingested_at": datetime.now().isoformat(),
+                "section": f"Part {(i // 50) + 1}",
+                "doc_version": "1.0"
             })
-            
-    print(f"Generated {len(passages_data)} passages (Target: {target_passages})")
     
-    # Generate Eval Data (Gold)
-    # We need target_questions
-    # We'll sample from the unique original passages to avoid too much redundancy in questions if possible,
-    # but if we need 5000 and only have ~400 unique, we must reuse.
-    
-    gold_eval_data = []
-    while len(gold_eval_data) < target_questions:
-        needed = target_questions - len(gold_eval_data)
-        # Generate from random selection of passages
-        # We use all_passages (unique ones) to generate questions to ensure quality, 
-        # but we might need to generate multiple questions per passage or loop.
+    else:
+        print("=" * 60)
+        print("⚠️ USING SHAKESPEARE (DEMO ONLY - METRICS WILL BE LOW)")
+        print("=" * 60)
         
-        # Let's generate 1 question per passage in a loop until we have enough
-        batch_qa = generate_synthetic_qa(all_passages, min(len(all_passages), needed))
+        # 1. Download Data
+        raw_text = download_tiny_shakespeare(CONFIG["TINY_SHAKESPEARE_URL"])
         
-        for item in batch_qa:
-            if len(gold_eval_data) >= target_questions:
-                break
-            # Update IDs to be unique for the eval set
-            item["id"] = str(len(gold_eval_data))
-            gold_eval_data.append(item)
+        # 2. Process & Chunk
+        all_passages = chunk_text(raw_text, CONFIG["CHUNK_SIZE"], CONFIG.get("OVERLAP", 30))
+        print(f"Total passages created: {len(all_passages)}")
+        
+        # 3. Create passages_data
+        target_passages = min(len(all_passages), args.num_passages)
+        passages_data = []
+        
+        for i in range(target_passages):
+            text = all_passages[i % len(all_passages)]
+            passages_data.append({
+                "id": str(i),
+                "title": f"Shakespeare Passage {i}",
+                "text": normalize_text(text),
+                "doc_id": str(i),
+                "chunk_id": i,
+                "source": "tiny_shakespeare",
+                "ingested_at": datetime.now().isoformat(),
+                "section": f"Part {(i // 50) + 1}",
+                "doc_version": "1.0"
+            })
+        
+        # 4. Generate synthetic QA
+        gold_eval_data = []
+        target_questions = args.num_questions
+        
+        while len(gold_eval_data) < target_questions:
+            needed = target_questions - len(gold_eval_data)
+            batch_qa = generate_synthetic_qa(all_passages, min(len(all_passages), needed))
             
-    print(f"Generated {len(gold_eval_data)} eval questions (Target: {target_questions})")
+            for item in batch_qa:
+                if len(gold_eval_data) >= target_questions:
+                    break
+                item["id"] = str(len(gold_eval_data))
+                gold_eval_data.append(item)
+        
+        print(f"Generated {len(gold_eval_data)} eval questions (Target: {target_questions})")
     
-    # Add Security Test Queries
+    # Add Security, Unanswerable, Noisy queries (both datasets)
     print("Generating security test queries...")
     security_queries = generate_security_test_queries()
     
@@ -322,7 +599,47 @@ def main():
         gold_eval_data.append(sec_query)
     
     print(f"Added {len(security_queries)} security test queries")
+    
+    # Add Unanswerable Queries (No-Answer Test Set)
+    print("Generating unanswerable queries...")
+    unanswerable_queries = generate_unanswerable_queries()
+    
+    for unans_query in unanswerable_queries:
+        unans_query["id"] = str(len(gold_eval_data))
+        gold_eval_data.append(unans_query)
+    
+    print(f"Added {len(unanswerable_queries)} unanswerable test queries")
+    
+    # Add Noisy Queries (Robustness Test Set)
+    print("Generating noisy queries...")
+    # Use first 100 regular queries as base for noisy versions
+    regular_queries = [q for q in gold_eval_data if q.get("query_type") not in ["unanswerable", "noisy", "security"]]
+    noisy_queries = generate_noisy_queries(regular_queries[:100], noise_ratio=0.5)
+    
+    for noisy_query in noisy_queries:
+        noisy_query["id"] = str(len(gold_eval_data))
+        gold_eval_data.append(noisy_query)
+    
+    print(f"Added {len(noisy_queries)} noisy test queries")
+    
     print(f"Total eval questions: {len(gold_eval_data)}")
+
+    # Save metadata to separate file
+    metadata_path = os.path.join(args.output_dir, "passages_metadata.jsonl")
+    print(f"Saving metadata to {metadata_path}...")
+    with open(metadata_path, 'w', encoding='utf-8') as f:
+        for item in passages_data:
+            metadata = {
+                "doc_id": item["doc_id"],
+                "chunk_id": item["chunk_id"],
+                "source": item["source"],
+                "ingested_at": item["ingested_at"],
+                "section": item["section"],
+                "doc_version": item["doc_version"]
+            }
+            f.write(json.dumps(metadata) + "\n")
+    
+    print(f"✅ Saved metadata for {len(passages_data)} passages")
 
     # 4. Save Files
     train_path = os.path.join(args.output_dir, "passages_train.jsonl")

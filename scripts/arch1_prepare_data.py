@@ -8,18 +8,15 @@ from typing import List, Dict, Tuple
 from tqdm import tqdm
 
 CONFIG = {
-    # Natural Questions (NQ) - Simplified version from DPR
     "NQ_TRAIN_URL": "https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-nq-train.json.gz",
     "NQ_DEV_URL": "https://dl.fbaipublicfiles.com/dpr/data/retriever/biencoder-nq-dev.json.gz",
-    # Wikipedia passages from DPR
     "WIKI_PASSAGES_URL": "https://dl.fbaipublicfiles.com/dpr/wikipedia_split/psgs_w100.tsv.gz",
-    # Fallback: Tiny Shakespeare for demo
     "TINY_SHAKESPEARE_URL": "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
-    "CHUNK_SIZE": 100,  # words (DPR standard)
-    "OVERLAP": 20,      # word overlap
+    "CHUNK_SIZE": 100,
+    "OVERLAP": 20,
     "EVAL_RATIO": 0.1,
     "SEED": 42,
-    "USE_NQ": True      # Set to True for NQ, False for Shakespeare demo
+    "USE_NQ": True
 }
 
 def download_tiny_shakespeare(url: str) -> str:

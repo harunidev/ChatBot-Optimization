@@ -908,7 +908,7 @@ def main():
         eval_data = [json.loads(line) for line in f]
     
     # Apply limit if specified (default 500)
-    if args.limit > 0 and len(eval_data) > args.limit:
+    if args.limit is not None and args.limit > 0 and len(eval_data) > args.limit:
         print(f"⚠️ Limiting evaluation to random subset of {args.limit} queries (of {len(eval_data)}) for speed.", flush=True)
         random.seed(42)  # Ensure reproducibility
         random.shuffle(eval_data)
@@ -1935,4 +1935,3 @@ if __name__ == "__main__":
         run_unit_tests()
     else:
         main()
-```
